@@ -71,7 +71,6 @@ class SeedBank:
 #------------------------
 
 def projection_onto_l1_ball(s,tau=1.0):    
-# used for sigunlar value vector projection in the next nuclar ball projection function
 # we use soft-thresholding proj(s) = sign(s)*max(0,|s|-lambda) where sum(max(0,|s|-lambda))=tau
     s = np.asarray(s, dtype=np.float64)
     
@@ -125,7 +124,7 @@ class LogisticCauchyPenaltyProblem:
     def diameter(self):
         return 2.0*self.tau
     
-    def sigmoid(self,z):
+    def sigmoid(self,z):   # for stability we use sigmoid(z) = 1/(1+exp(-z)) when z>=0, and exp(z)/(1+exp(z)) when z<0
         z = np.asarray(z,dtype=np.float64)
         sigmoid_z = np.empty_like(z)
         positive = z>= 0 
@@ -158,7 +157,7 @@ class LogisticCauchyPenaltyProblem:
         return g + self.L*x
     
     #---------------------
-    #-----
+    #----- we define log(1+x^2/delta^2) and its gradient
     #------------------------
 
     def R_component(self,x):
@@ -168,8 +167,8 @@ class LogisticCauchyPenaltyProblem:
         return (2.0*x)/(self.delta**2+x*x)
     
     #---------------------
-    #----
-    #----------
+    #---- G(x) = L/2 \|x\|^2 - lam sum_j log(1+x_j^2/delta^2)
+    #---------------------
     def G_value(self,x):
         x= np.asarray(x,dtype=np.float64)
         return float(0.5*self.L*np.dot(x,x)) - float(self.lam*np.sum(self.R_component(x)))
@@ -199,7 +198,7 @@ class LogisticCauchyPenaltyProblem:
 def make_logistic_cauchy_pen_problem(n=800,d=100,scale=2.0,seed=0):
     rng= np.random.default_rng(seed)
     P = rng.standard_normal((n,d))
-    P *= (scale/(np.linalg.norm(P,axis=1,keepdims=True)+1e-12))
+    P *= (scale/(np.linalg.norm(P,axis=1,keepdims=True)+1e-12))     # control the feature vector magnitude for stability
     y = rng.choice([-1.0,1.0],size=n)
     return P,y
 
@@ -234,7 +233,7 @@ class Dc_vr_scgs:
     delta_decay = 0.5
     delta_min = 1e-8
     eta_scale = 0.7
-    max_inner = 2500          #1200?
+    max_inner = 2500          
     max_cndgB = 500
     check_gap_every = 10
 
@@ -288,7 +287,7 @@ def ncgs_vr(problem, x0, cfg=NCGS_VR, rng=None, seed=1):
         full_grad_tilde = problem.phi_full_grad(x_tilde)
         for t in range(mA):
             if iteration >= cfg.T:
-                found = True     # we set found also to break the outer loop s
+                found = True     # we set found to break the outer loop s
                 break
             idx = rng.integers(0,n,size=bA)
             v = (problem.H_batch_grad(x,idx)-problem.H_batch_grad(x_tilde,idx))
@@ -398,21 +397,16 @@ def prox_dc_vr_scgs(problem, x0 , cfg=Prox_dc_vr_scgs, rng=None, seed=1):
     
     for t in range(cfg.T_outer):
         mu_t = cfg.mu0 * (cfg.mu_decay ** t)      # we construct a decrasing squence mu_t = mu_0 * mu_decay^t
-        L_sur = L_H + mu_t                # for hat{phi}_t(x)=H(x) - <nabla G(x_t),x-x_t> + mu_t||x-x_t||^2, L_sur = L_H + mu_t
+        L_sur = L_H + mu_t                # for hat{phi}_t(x)=H(x) -G(x_t)- <nabla G(x_t),x-x_t> + mu_t/2 ||x-x_t||^2, L_sur = L_H + mu_t
            
         #delta_t = 1/((t+1)**2*(t+2)**2)
         delta_t= 1/((t+1)*(t+2))           # the choice in theorem 4.13 of the thesis
         
-     
         
         t0 = time.perf_counter()                 #metric part, calculate the function values
         Phi_value = problem.phi(x)
         metric_time += time.perf_counter() - t0
         
-        #stopping_at_2000 = time.perf_counter() - start - metric_time
-        #if stopping_at_2000 >= 2000:
-        #    print(f"Stopping at t={t} due to reaching time limit: {stopping_at_2000:.2f} seconds")
-        #    break
 
         times.append(time.perf_counter() - start - metric_time)
         function_value.append(Phi_value)
@@ -421,17 +415,15 @@ def prox_dc_vr_scgs(problem, x0 , cfg=Prox_dc_vr_scgs, rng=None, seed=1):
         x_center = x.copy()
 
         delta_s=0.0
-        x_inner = x.copy()         # x0 <---- x_t according to the algorithm
+        x_inner = x.copy()         # x0 <---- x_t according to the empirical initialization
         y_inner = x_inner.copy()   # y0 <---- x_t
 
         found = False
         inner_it = 0
-        epochs = int(np.ceil(cfg.max_inner / cfg.mB))   #theoretically we dont set this epochs bound, but for practice we do
+        epochs = int(np.ceil(cfg.max_inner / cfg.mB))   #theoretically we dont set this epochs bound, but for practice it can be a good choice
         for s in range(epochs):
             if found==True:
                 break
-            '''if gap <= delta_min:  # gap \leq delta_t:
-                break'''
             
             w_tilde = y_inner.copy()
             fullH_tilde = problem.H_full_grad(w_tilde)
@@ -440,14 +432,9 @@ def prox_dc_vr_scgs(problem, x0 , cfg=Prox_dc_vr_scgs, rng=None, seed=1):
             #N_s= int(np.ceil(2*np.sqrt(6*L_sur/mu_t)))
             N_s = int(np.ceil(np.sqrt(32*(L_sur/mu_t))))
             delta_s = max(cfg.delta_min, cfg.delta0 * (cfg.delta_decay ** s))
-            for k in range(N_s):    #N_s -1 ????????
-                
-                #if inner_it >= N_s:#or gap <= delta_min:
-                   # print(f"Stopping at inner_it={inner_it} due to reaching max_inner={max_inner},delta_t={delta_t:.3e}, gap={gap:.3e}")
-                   # break
+            for k in range(N_s):    
 
-                # ---- CGS extrapolation point z_k = (1-gamma_k) y + gamma_k x ----
-                gamma_k = 2.0 / (k + 2.0)  # in (0,1], gives gamma_1=1,... inner_it+2
+                gamma_k = 2.0 / (k + 2.0)  
                 lam_t= (k+1.0) / (3.0 * L_sur)
                 eta_k = 8.0 * L_sur * delta_s / (mu_t * N_s * (k+1.0))  
                 #eta_k = 2*L_sur*D_s_square / (N_s * (k+1.0))
@@ -456,15 +443,13 @@ def prox_dc_vr_scgs(problem, x0 , cfg=Prox_dc_vr_scgs, rng=None, seed=1):
 
                 idx = rng.integers(0, n, size=800)
 
-                # SVRG for H, evaluated at z_k
                 vH = (problem.H_batch_grad(z_k, idx) - problem.H_batch_grad(w_tilde, idx)) + fullH_tilde
 
-                # Surrogate gradient estimator at z_k: ∇H(z_k) - g_t + μ (z_k - x_center)
+                # v_k in DC_SVRCGS
                 v = vH - g_t + mu_t * (z_k - x_center)
                 
                 x_new,fw_gap_from_first_iteration= cndg_l1_gap0_checking(v, x_inner,z=z_k, lam=lam_t, eta=eta_k , tau=problem.tau, max_cndg=cfg.max_cndgB)  
-                ####### I add a z_k here, because I'm worried about the dual gap at the first iteration of CG should be at z_k,
-                #####    otherwise it might look like fw_gap_from_f_i = \<v, x_inner - g_j\> is neither a gap at x_inner nor a gap at z_k, which is weird. 
+                
                 if k == N_s-1:
                     print(f"oh {s} {N_s} {fw_gap_from_first_iteration}")
         
@@ -480,7 +465,7 @@ def prox_dc_vr_scgs(problem, x0 , cfg=Prox_dc_vr_scgs, rng=None, seed=1):
                 x_inner = x_new
                 inner_it += 1
 
-        x = z_k   # theoretically we should output y_inner here, but not align with our outer loop, see the description in the note of overleaf
+        x = z_k   # Normally in scgs we should output y_inner here, but not align with our outer loop, see the description in the note of overleaf
     
     return x, np.array(times),np.array(function_value)
 
@@ -508,7 +493,7 @@ def dc_vr_scgs(problem, x0, cfg=Dc_vr_scgs, rng=None, seed=1):
     
     for t in range(cfg.T_outer):
         mu_t = mu0 * (cfg.mu_decay ** t)
-        #delta_t = 1/((t+1))   #????????????100/((t+1)*(t+2))
+        #delta_t = 1/((t+1))   #100/((t+1)*(t+2)) could be a choice
         #delta_t = 1/((t+1)**2*(t+2)**2)
         delta_t= 1/((t+1)*(t+2))
         L_sur = L_H + mu_t
@@ -530,12 +515,10 @@ def dc_vr_scgs(problem, x0, cfg=Dc_vr_scgs, rng=None, seed=1):
 
         found = False
         inner_it = 0
-        epochs = int(np.ceil(cfg.max_inner / cfg.mB))  #theoretically we dont set this epochs bound, but for practice we do
+        epochs = int(np.ceil(cfg.max_inner / cfg.mB))  #theoretically we dont set this epochs bound, but for practice it can be an option
         for s in range(epochs):
             if found==True:
                 break
-            '''if gap <= delta_min:  # gap \leq delta_t:
-                break'''
             
             
             w_tilde = y_inner.copy()
@@ -544,33 +527,30 @@ def dc_vr_scgs(problem, x0, cfg=Dc_vr_scgs, rng=None, seed=1):
             delta_s = max(cfg.delta_min, cfg.delta0 * (cfg.delta_decay ** s))
             #N_s = int(np.ceil(2**(((s+1)/2+2))))
             N_s = 50
-            #print(N_s)
-            for k in range(N_s): #something off here!!!!!!!!!!!!!!!!
+            for k in range(N_s): 
                 if k == N_s-1:
                     print(f"oh {t} | {s} {N_s} {fw_gap_from_first_iteration}")
 
-                # ---- CGS extrapolation point z_k = (1-gamma_k) y + gamma_k x ----
-                gamma_k = 2.0 / (k + 2.0)  # in (0,1], gives gamma_1=1,... inner_it+2
+                
+                gamma_k = 2.0 / (k + 2.0)  
                 lam_t= (k+1.0) / (3.0 * L_sur)
-
                 eta_k = 8.0 * L_sur * delta_s / (N_s * (k+1.0))
                 #eta_k = 2*L_sur*D**2 / (N_s * (k+1.0))
                 #eta_k = 2*L_sur*delta_s / (N_s * (k+1.0))
                 
                 z_k = (1.0 - gamma_k) * y_inner + gamma_k * x_inner
                 
-                idx = rng.integers(0, n, size=800)   #200
+                idx = rng.integers(0, n, size=800)   
 
-                # SVRG for H, evaluated at z_k
                 vH = (problem.H_batch_grad(z_k, idx) - problem.H_batch_grad(w_tilde, idx)) + fullH_tilde
 
-                # Surrogate gradient estimator at z_k: ∇H(z_k) - g_t + μ (z_k - x_center)
+                # v_k
                 v = vH - g_t + mu_t * (z_k - x_center)
                 
                 x_new,fw_gap_from_first_iteration= cndg_l1_gap0_checking(v, x_inner,z=z_k, lam=lam_t, eta=eta_k, tau=problem.tau, max_cndg=cfg.max_cndgB)  
                 
                 if fw_gap_from_first_iteration <= delta_t:
-                        print(f"outer{t}, epoch {s}: current_N_s={N_s} ") #batch_size={batch_size}, control_batch_size={constant_control_batch_size}
+                        print(f"outer{t}, epoch {s}: current_N_s={N_s} ") 
                         print(f"Stopping at total_inner_it={inner_it} due to small gap={fw_gap_from_first_iteration:.3e} <= delta_t={delta_t:.3e}")
                         gap = fw_gap_from_first_iteration
                         found = True
@@ -707,7 +687,7 @@ def run_experiment(base_seed=0):
     base_name = f"result_{stamp}_seed{base_seed}_{uuid.uuid4().hex[:6]}"
    
 
-    # 3. Save Figure 2
+    # 3. Save Figure 
     plt.figure(1)  
     fname2 = RESULTS_DIR / f"{base_name}_value.png"
     plt.tight_layout(pad=0.15)
@@ -721,5 +701,5 @@ def run_experiment(base_seed=0):
 
 if __name__ == "__main__":
     print("Done. Showing plot...")
-    out = run_experiment(base_seed=20)   #base_seed=8
+    out = run_experiment(base_seed=20)   
     plt.show()
