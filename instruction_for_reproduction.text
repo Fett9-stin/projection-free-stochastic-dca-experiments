@@ -1,3 +1,10 @@
+Note that:
+Most of the plots use CPU times as one axis. Since the performance of
+the CPU might vary differently each time, so the function value should be
+reproducible for the same seeds, but the exact horizontal positions on the CPU-times axis
+might slightly differ.
+
+
 #--------SDCAFW instruction----------------------
 
 To reproduce the experimental results from the thesis:
